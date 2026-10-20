@@ -1,5 +1,6 @@
 {
   "keys": [
+    {"key": "YOUR_CAPMONSTER_KEY_HERE", "label": "capmonster"},
     {"key": "YOUR_2CAPTCHA_KEY_HERE", "label": "primary"},
     {"key": "BACKUP_KEY_HERE", "label": "backup"}
   ]

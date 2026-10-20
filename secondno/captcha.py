@@ -12,11 +12,16 @@ Backends (tried in order by CaptchaRouter):
      env RUCAPTCHA_KEY
      data/secondno/captcha_keys.json  {"keys":[{"key":"...","label":"..."}]}
    See captcha_keys.example.json for the template.
+2. CapMonsterCloud — api.capmonster.cloud, TurnstileTaskProxyless (~$0.8/solve, 10-30s).
+   Key source (first match wins):
+     env CAPMONSTER_API_KEY
+     data/secondno/captcha_keys.json  {"keys":[{"key":"...","label":"capmonster"}]}
+3. TwoCaptchaTurnstile — 2captcha.com, method=turnstile (see notes above).
 
-CaptchaRouter: tries sidecar first; on failure/timeout falls back to 2captcha.
+CaptchaRouter: tries sidecar → capmonster → 2captcha; falls back on failure/timeout.
 Retries each backend up to `retries` times before giving up.
 
-get_solver(): returns a CaptchaRouter (sidecar+2captcha fallback chain).
+get_solver(): returns a CaptchaRouter (sidecar+capmonster+2captcha fallback chain).
 get_sidecar(): returns SidecarSolver only (no fallback).
 get_2captcha(): returns TwoCaptchaTurnstile only (no fallback).
 test_solve(sitekey, pageurl): quick smoke test — returns {"ok":bool,"backend":str,"elapsed":float}.
@@ -152,6 +157,75 @@ class SidecarSolver:
         return d["token"]
 
 
+def _load_capmonster_key():
+    """Find CapMonster Cloud key. env CAPMONSTER_API_KEY first, then keys file label=capmonster."""
+    v = os.environ.get("CAPMONSTER_API_KEY", "").strip()
+    if v:
+        return v
+    try:
+        d = json.load(open(KEYS_FILE, encoding="utf-8"))
+        entries = d.get("keys", []) if isinstance(d, dict) else (d if isinstance(d, list) else [])
+        for k in entries:
+            if isinstance(k, dict) and "capmonster" in str(k.get("label", "")).lower():
+                key = str(k.get("key", "")).strip()
+                if key:
+                    return key
+    except Exception:
+        pass
+    return ""
+
+
+class CapMonsterCloud:
+    """capmonster.cloud turnstile solver (TurnstileTaskProxyless). ~$0.8/solve, 10-30s."""
+
+    API = "https://api.capmonster.cloud"
+
+    def __init__(self, key=None):
+        self.key = key or _load_capmonster_key()
+        if not self.key:
+            raise RuntimeError(
+                "no CapMonster key (env CAPMONSTER_API_KEY or keys file label=capmonster)")
+
+    def _post(self, method, payload, timeout=40):
+        req = urllib.request.Request(
+            self.API + "/" + method,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+
+    def balance(self):
+        try:
+            r = self._post("getBalance", {"clientKey": self.key}, timeout=20)
+            return float(r.get("balance", -1))
+        except Exception:
+            return -1.0
+
+    def turnstile(self, sitekey, pageurl, action=None, proxy_url=None):
+        task = {"type": "TurnstileTaskProxyless", "websiteURL": pageurl,
+                "websiteKey": sitekey}
+        if action:
+            task["turnstileAction"] = action
+        r = self._post("createTask", {"clientKey": self.key, "task": task})
+        if r.get("errorId"):
+            raise RuntimeError(
+                f"capmonster createTask: {r.get('errorCode')} {r.get('errorDescription')}")
+        tid = r["taskId"]
+        t0 = time.time()
+        while time.time() - t0 < 180:
+            time.sleep(5)
+            r2 = self._post("getTaskResult", {"clientKey": self.key, "taskId": tid})
+            if r2.get("status") == "ready":
+                tok = (r2.get("solution") or {}).get("token")
+                if tok:
+                    print(f"[capmonster] turnstile solved in {time.time() - t0:.1f}s",
+                          flush=True)
+                    return tok
+                raise RuntimeError("capmonster: empty token")
+            if r2.get("errorId"):
+                raise RuntimeError(f"capmonster getTaskResult: {r2.get('errorCode')}")
+        raise TimeoutError("capmonster solve timed out after 180s")
+
+
 class CaptchaRouter:
     """Tries backends in order with retries. Falls back on failure/timeout.
 
@@ -199,13 +273,23 @@ class CaptchaRouter:
             elif isinstance(b, TwoCaptchaTurnstile):
                 info["alive"] = True  # key loaded = alive
                 info["balance"] = round(b.balance(), 3)
+            elif isinstance(b, CapMonsterCloud):
+                info["alive"] = True
+                info["balance"] = round(b.balance(), 3)
             out.append(info)
         return out
 
 
 def _build_backends():
-    """Build ordered backend list: sidecar (if alive) → 2captcha (if key)."""
+    """Build ordered backend list: capmonster (if key, proven ~13s) → sidecar (if alive)
+    → 2captcha (if key). CapMonster first: sidecar can hang 180s on unsolvable sitekeys."""
     backends = []
+    try:
+        cm = CapMonsterCloud()
+        backends.append(cm)
+        print(f"[captcha] capmonster key loaded (balance ${cm.balance():.2f})", flush=True)
+    except RuntimeError as e:
+        print("[captcha] capmonster unavailable:", str(e)[:80], flush=True)
     s = SidecarSolver()
     if s.alive():
         backends.append(s)
@@ -219,11 +303,11 @@ def _build_backends():
 
 
 def get_solver():
-    """Returns CaptchaRouter with sidecar+2captcha fallback chain."""
+    """Returns CaptchaRouter with capmonster+sidecar+2captcha fallback chain."""
     backends = _build_backends()
     if not backends:
         raise RuntimeError(
-            "no captcha backend available — start sidecar (:8877) or set TWOCAPTCHA_API_KEY")
+            "no captcha backend available — set CAPMONSTER_API_KEY / start sidecar (:8877) / set TWOCAPTCHA_API_KEY")
     return CaptchaRouter(backends=backends, retries=2)
 
 
@@ -238,6 +322,10 @@ def get_sidecar():
 def get_2captcha():
     """Returns TwoCaptchaTurnstile only (no fallback). Raises if no key."""
     return TwoCaptchaTurnstile()
+
+def get_capmonster():
+    """Returns CapMonsterCloud only (no fallback). Raises if no key."""
+    return CapMonsterCloud()
 
 
 def test_solve(sitekey=None, pageurl=None):
@@ -275,12 +363,22 @@ def captcha_status():
         bal_2captcha = round(tc.balance(), 3)
     except Exception:
         pass
+    has_capmonster = False
+    bal_capmonster = -1
+    try:
+        cm = CapMonsterCloud()
+        has_capmonster = True
+        bal_capmonster = round(cm.balance(), 3)
+    except Exception:
+        pass
     return {
         "sidecar_alive": sc_alive,
         "sidecar_url": sidecar.url,
+        "has_capmonster_key": has_capmonster,
+        "balance_capmonster": bal_capmonster,
         "has_2captcha_key": has_2captcha,
         "balance_2captcha": bal_2captcha,
         "keys_file": KEYS_FILE,
         "keys_file_exists": os.path.isfile(KEYS_FILE),
-        "ready": sc_alive or has_2captcha,
+        "ready": has_capmonster or sc_alive or has_2captcha,
     }
