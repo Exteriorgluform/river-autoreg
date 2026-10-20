@@ -112,6 +112,128 @@ class GmailForwardInbox:
         return None
 
 
+class TOnlineIMAP:
+    """t-online.de IMAP inbox from data/mail_pool.txt (legit ISP domain — NOT blocked
+    by 2nd-no.com the way disposable tempmail domains are). t-online mail can lag
+    minutes -> long WAIT_TIMEOUT. Decodes QP/base64 so register()'s confirm-link
+    regex matches. Each factory call rotates to the next pool account."""
+    IMAP_HOST = "secureimap.t-online.de"
+    WAIT_TIMEOUT = 900
+    _POOL = None
+    _IDX = [0]
+
+    def __init__(self, pool_file=None, account=None):
+        self._imaplib = __import__("imaplib")
+        self._email = __import__("email")
+        pf = pool_file or os.path.join(os.path.dirname(HOME), "mail_pool.txt")
+        self.account = account or self._pick(pf)
+        self.addr = self.account[0]
+        self.pw = self.account[1]
+
+    @classmethod
+    def _load_pool(cls, pf):
+        if cls._POOL is None:
+            pool = []
+            try:
+                for ln in open(pf, encoding="utf-8", errors="ignore"):
+                    ln = ln.strip()
+                    if not ln or ln.startswith("#") or "@" not in ln or ":" not in ln:
+                        continue
+                    e, _, p = ln.partition(":")
+                    pool.append((e.strip(), p.strip()))
+            except Exception:
+                pool = []
+            cls._POOL = pool
+        return cls._POOL
+
+    @classmethod
+    def _pick(cls, pf):
+        pool = cls._load_pool(pf)
+        if not pool:
+            raise RuntimeError("mail_pool.txt empty/missing")
+        i = cls._IDX[0] % len(pool)
+        cls._IDX[0] += 1
+        return pool[i]
+
+    def make_address(self, tag=None):
+        # Snapshot existing UIDs so wait_email only considers NEW mail (the pool
+        # accounts have dozens of old messages that would false-match).
+        self._baseline = self._current_uids()
+        return self.addr
+
+    def _connect(self):
+        # timeout guards against t-online IMAP throttling (accepts TCP but stalls
+        # on login/search after many rapid connections) -> fail fast, retry in loop.
+        M = self._imaplib.IMAP4_SSL(self.IMAP_HOST, 993, timeout=30)
+        M.login(self.addr, self.pw)
+        M.select("INBOX")
+        return M
+
+    def _current_uids(self):
+        try:
+            M = self._connect()
+            typ, data = M.uid("SEARCH", None, "ALL")
+            uids = set(data[0].split())
+            M.logout()
+            return uids
+        except Exception:
+            return set()
+
+    def wait_email(self, target_email, timeout=None, poll=10):
+        timeout = timeout or self.WAIT_TIMEOUT
+        baseline = getattr(self, "_baseline", None)
+        if baseline is None:
+            baseline = set()
+        # Fast path: SENTSINCE limits the scan to ~last day of mail. Pool accounts
+        # have 1000s of old spam; fetching ALL would never finish in time.
+        since = time.strftime("%d-%b-%Y", time.localtime(time.time() - 86400))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                M = self._connect()
+                # Targeted: only mail from the 2nd-no sender (kontakt@2nr.pl /
+                # 2nd-no.com). Fetching all SENTSINCE mail is too slow on pool
+                # accounts that receive a spam flood (100s/day).
+                typ, data = M.uid("SEARCH", None, f'(SENTSINCE {since} FROM "2nr")')
+                uids = data[0].split()
+                if not uids:
+                    typ, data = M.uid("SEARCH", None, f'(SENTSINCE {since} FROM "2nd-no")')
+                    uids = data[0].split()
+                if not uids:
+                    typ, data = M.uid("SEARCH", None, f"(SENTSINCE {since})")
+                    uids = data[0].split()
+                for uid in reversed(uids):
+                    if uid in baseline:
+                        continue
+                    typ, md = M.uid("FETCH", uid, "(RFC822)")
+                    if not md or not md[0]:
+                        continue
+                    msg = self._email.message_from_bytes(md[0][1])
+                    txt = self._decode(msg)
+                    low = txt.lower()
+                    if ("2nd-no" in low or "2nr" in low or "create-account" in low) and "http" in low:
+                        M.logout()
+                        return {"raw": txt}
+                M.logout()
+            except Exception:
+                pass
+            time.sleep(poll)
+        return None
+
+    def _decode(self, msg):
+        out = []
+        for part in msg.walk():
+            if part.get_content_type() in ("text/plain", "text/html"):
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        cs = part.get_content_charset() or "utf-8"
+                        out.append(payload.decode(cs, "ignore"))
+                except Exception:
+                    pass
+        return "\n".join(out)
+
+
 _FILL_JS = """(args) => {
     let n = 0;
     const setVal = (el, v) => { if (!el) return; try {
@@ -141,11 +263,15 @@ class SecondNo:
     def _start(self):
         if self._pg is None:
             self._pw = sync_playwright().start()
+            # SECONDNO_PROXY routes the browser through a fresh IP (2nd-no limits
+            # free registrations to ~2 per IP -> RegistrationLimitReached 403).
+            prox = os.environ.get("SECONDNO_PROXY", "").strip()
+            kw = {"proxy": {"server": prox}} if prox else {}
             try:
                 self._browser = self._pw.chromium.launch(
                     headless=self.headless, channel="chrome",
                     args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
-                          "--window-position=2400,2400"])
+                          "--window-position=2400,2400"], **kw)
             except Exception:
                 # channel="chrome" fails when SYSTEMDRIVE-ish env is broken
                 # (playwright resolves "undefined\Program Files\..."); use
@@ -153,7 +279,7 @@ class SecondNo:
                 self._browser = self._pw.chromium.launch(
                     headless=self.headless,
                     args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
-                          "--window-position=2400,2400"])
+                          "--window-position=2400,2400"], **kw)
             ctx = self._browser.new_context(user_agent=UA, locale="en-US")
             self._pg = ctx.new_page()
             self._pg.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
@@ -216,16 +342,24 @@ class SecondNo:
             raise RuntimeError(f"register fill failed: {ok}")
         pg.evaluate("() => document.querySelector('button[type=submit]').click()")
         pg.wait_for_timeout(6000)
+        # debug: did signup succeed / what does the page say?
+        try:
+            print(f"[secondno] post-signup url={pg.url}", flush=True)
+            snip = pg.evaluate("() => document.body ? document.body.innerText.replace(/\\s+/g,' ').slice(0,240) : ''")
+            print(f"[secondno] page: {snip!r}", flush=True)
+        except Exception:
+            pass
         # confirm email
         msg = None
+        _to = getattr(inbox, "WAIT_TIMEOUT", 180)
         if hasattr(inbox, "wait_email"):
             try:
-                msg = inbox.wait_email(sender="2nr", timeout=180)
+                msg = inbox.wait_email(sender="2nr", timeout=_to)
             except TypeError:
-                msg = inbox.wait_email(email, timeout=180)
+                msg = inbox.wait_email(email, timeout=_to)
         if msg is None and hasattr(inbox, "wait_email"):
             try:
-                msg = inbox.wait_email(email, timeout=60)
+                msg = inbox.wait_email(email, timeout=min(_to, 120))
             except Exception:
                 msg = None
         link = None

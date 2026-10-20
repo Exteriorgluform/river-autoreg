@@ -21,14 +21,18 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("SECONDNO_HOME", os.path.join(ROOT, "data", "secondno"))
 sys.path.insert(0, ROOT)
 
-from secondno import full_cycle, GmailForwardInbox  # noqa: E402
+from secondno import full_cycle, GmailForwardInbox, TOnlineIMAP  # noqa: E402
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     n = int(args[0]) if args else 1
-    inbox_factory = GmailForwardInbox if "--gmail" in sys.argv else None
-    results = full_cycle(n, inbox_factory=inbox_factory)
+    inbox_factory = None
+    if "--gmail" in sys.argv:
+        inbox_factory = GmailForwardInbox
+    elif "--tonline" in sys.argv:
+        inbox_factory = TOnlineIMAP
+    results = full_cycle(n, inbox_factory=inbox_factory, headless=True)
     ok = 0
     for r in results:
         print(json.dumps(r, ensure_ascii=False), flush=True)
