@@ -1,0 +1,6 @@
+{
+  "keys": [
+    {"key": "YOUR_2CAPTCHA_KEY_HERE", "label": "primary"},
+    {"key": "BACKUP_KEY_HERE", "label": "backup"}
+  ]
+}

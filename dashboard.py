@@ -124,6 +124,13 @@ def snapshot():
             log_tail += f"--- {lf} ---\n" + "\n".join(txt.splitlines()[-12:]) + "\n"
         except Exception:
             pass
+    # captcha subsystem status
+    try:
+        sys.path.insert(0, ROOT)
+        from secondno.captcha import captcha_status as _cs
+        cap = _cs()
+    except Exception as e:
+        cap = {"ready": False, "err": str(e)[:80]}
     return {
         "now": int(time.time()),
         "radar": radar_state(),
@@ -132,6 +139,7 @@ def snapshot():
         "secondno": {"accounts": sn_accs, "used_numbers": list(used)[-20:], "used_count": len(used)},
         "mail_pool": mail_pool,
         "sidecar": sidecar_ok(),
+        "captcha": cap,
         "log_tail": log_tail[-3000:],
     }
 
@@ -233,6 +241,7 @@ border-radius:4px;padding:5px;font:12px inherit}
 <button onclick="act('reg')">🚀 River-волна ×<input type="number" id="nreg" value="1" min="1" max="50"> (--phone secondno)</button>
 <button onclick="act('complete')">⏳ Complete pending</button>
 <button onclick="act('reserve_test')">📱 Reserve-тест 2nd-no</button>
+<button onclick="act('captcha_test')">🧩 Captcha-тест</button>
 <button onclick="load()">🔄 Обновить</button>
 <label style="color:var(--mut);font-size:12px;align-self:center"><input type="checkbox" id="auto" checked> авто-обновление 15с</label>
 </div></div>
@@ -255,7 +264,9 @@ function render(){
   ['2nd-no акков',S.secondno.accounts.length,S.secondno.accounts.length?'ok':'warn'],
   ['номеров сожжено',S.secondno.used_count,''],
   ['mail pool',S.mail_pool,S.mail_pool?'ok':'err'],
-  ['sidecar капча','<span class="dot '+(S.sidecar?'d-on':'d-off')+'"></span>'+(S.sidecar?'жив':'мёртв'),S.sidecar?'ok':'err'],
+  ['капча sidecar','<span class="dot '+((S.captcha&&S.captcha.sidecar_alive)?'d-on':'d-off')+'"></span>'+((S.captcha&&S.captcha.sidecar_alive)?'жив':'мёртв'),(S.captcha&&S.captcha.sidecar_alive)?'ok':'err'],
+  ['2captcha',(S.captcha&&S.captcha.has_2captcha_key)?('$'+S.captcha.balance_2captcha):'нет ключа',(S.captcha&&S.captcha.has_2captcha_key)?'ok':'warn'],
+  ['капча готова','<span class="dot '+((S.captcha&&S.captcha.ready)?'d-on':'d-off')+'"></span>'+((S.captcha&&S.captcha.ready)?'да':'нет'),(S.captcha&&S.captcha.ready)?'ok':'err'],
  ].map(c=>'<div class=card><div class="n '+c[2]+'">'+c[1]+'</div><div class=l>'+c[0]+'</div></div>').join('');
  document.getElementById('bankcount').textContent=st.total+' записей';
  const tb=document.querySelector('#bank tbody');
@@ -273,6 +284,7 @@ async function act(a){
  if(a==='reg'){body={n:+document.getElementById('nreg').value||1,phone:'secondno'};
   if(S&&S.radar.blocked&&!confirm('Radar-лок активен ещё '+fmtLeft(S.radar.left_s)+'. Попытка продлит блок. Всё равно?'))return;}
  if(a==='reserve_test'&&!confirm('Живой резерв номера 2nd-no (тратит капчу если нет reuse). ОК?'))return;
+ if(a==='captcha_test'&&!confirm('Решить тестовый turnstile 2nd-no.com (тратит капчу). ОК?'))return;
  if(btn)btn.disabled=true;
  try{const r=await fetch('/api/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const j=await r.json();alert(JSON.stringify(j,null,1));}catch(e){alert('err: '+e);}
@@ -329,6 +341,10 @@ class H(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": True, "pid": pid, "log": "data/wave.log"}))
             elif u == "/api/reserve_test":
                 self._send(200, json.dumps(reserve_test(), ensure_ascii=False))
+            elif u == "/api/captcha_test":
+                sys.path.insert(0, ROOT)
+                from secondno.captcha import test_solve
+                self._send(200, json.dumps(test_solve(), ensure_ascii=False))
             else:
                 self._send(404, '{"err":"nf"}')
         except Exception as e:
@@ -339,7 +355,13 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8910
     os.makedirs(DATA, exist_ok=True)
     os.makedirs(SN_HOME, exist_ok=True)
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    # Prevent Windows SO_REUSEADDR double-bind (multiple instances on same port).
+    ThreadingHTTPServer.allow_reuse_address = False
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    except OSError as e:
+        print(f"FATAL: port {port} busy ({e}). Kill stale dashboard instances first.", flush=True)
+        sys.exit(1)
     print(f"river dashboard: http://127.0.0.1:{port}", flush=True)
     srv.serve_forever()
 

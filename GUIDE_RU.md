@@ -108,6 +108,37 @@ Radar-сигнатуры: `_1_signals` — base64 JSON-фингерпринт; �
 6. **Access-blocked детектор** должен смотреть только rendered-текст страницы:
    i18n-словари AuthKit содержат строку блока во всех языках → ложные срабатывания.
 
+## Дашборд
+
+`python dashboard.py [port]` (по умолчанию 8910) — однофайловый stdlib-сервер, тёмный UI.
+Открывается на `http://127.0.0.1:8910`.
+
+- **Карточки**: статистика банка (OK/pending/failed), countdown Radar-лока, размер пула
+  2nd-no, сожжённые номера, mail pool, статус капчи (sidecar/2captcha/ready).
+- **Действия**: рега 2nd-no акков, запуск river-волны (`--phone secondno`),
+  complete pending, reserve-тест (живой номер 2nd-no), captcha-тест (живой solve turnstile).
+- **Таблицы**: аккаунты river-банка (email/stage/статус/key/ошибка), пул 2nd-no.
+- **Логи**: хвост reg2no.log / reserve_test.log / wave.log.
+- Авто-обновление каждые 15с (переключается). Секреты маскируются на сервере.
+
+## Капча (turnstile для 2nd-no резервов)
+
+Вендорный `secondno/captcha.py` даёт `CaptchaRouter` — пробует бэкенды по порядку с ретраями:
+
+1. **SidecarSolver** — локальный captcha-solver sidecar на `:8877` (БЕСПЛАТНО, ~14с/токен).
+   Health: `GET http://127.0.0.1:8877/health`. Поднимается отдельно. Приоритетный бэкенд.
+2. **TwoCaptchaTurnstile** — 2captcha.com фолбэк. Источник ключа (первый матч):
+   - env `TWOCAPTCHA_API_KEY`
+   - env `RUCAPTCHA_KEY`
+   - `data/secondno/captcha_keys.json` (шаблон: `captcha_keys.example.json`)
+
+   ВАЖНО: submit ТОЛЬКО через `in.php` (res.php → ERROR_EMPTY_METHOD);
+   баланс: POST `res.php {action:getbalance}`, значение в поле `request`.
+
+`get_solver()` возвращает роутер (sidecar → 2captcha фолбэк). Дашборд показывает
+живой статус капчи (sidecar alive, баланс 2captcha) и имеет кнопку **🧩 Captcha-тест**,
+которая решает реальный turnstile 2nd-no.com end-to-end.
+
 ## Файлы
 
 ```
@@ -115,6 +146,8 @@ river_reg.py         главный драйвер: signup → verify → radar 
 complete_pending.py  дожатие акков, застрявших на phone/SMS-шаге
 secondno_register.py рега акков 2nd-no.com для --phone secondno
 secondno/            вендорный клиент 2nd-no.com (2no.pl JSON-RPC + turnstile-солверы)
+dashboard.py         веб-дашборд (stdlib, :8910, тёмный UI, карточки/таблицы/действия)
+captcha_keys.example.json  шаблон конфига 2captcha-ключей (→ data/secondno/captcha_keys.json)
 river_wave.sh        пейсинг-обёртка волны
 mail_pool.example.txt
 requirements.txt

@@ -73,7 +73,42 @@ python river_reg.py 3 --phone secondno    # REUSE-FIRST reservation + OTP poll
 
 # finish accounts stuck at the phone step later
 python complete_pending.py --phone fivesim
+
+# dashboard (stdlib, dark UI, http://127.0.0.1:8910)
+python dashboard.py            # or: python dashboard.py 8910
 ```
+
+## Captcha (turnstile for 2nd-no reservations)
+
+The vendored `secondno/captcha.py` provides a `CaptchaRouter` that tries backends
+in order with retries:
+
+1. **SidecarSolver** — local captcha-solver sidecar at `:8877` (FREE, ~14s/token).
+   Health: `GET http://127.0.0.1:8877/health`. Start it separately (see your
+   captcha-solver sidecar setup). Preferred backend.
+2. **TwoCaptchaTurnstile** — 2captcha.com fallback. Key source (first match wins):
+   - env `TWOCAPTCHA_API_KEY`
+   - env `RUCAPTCHA_KEY`
+   - `data/secondno/captcha_keys.json` (copy from `captcha_keys.example.json`)
+
+   IMPORTANT: submit ONLY via `in.php` (res.php returns ERROR_EMPTY_METHOD);
+   balance check is POST `res.php {action:getbalance}`, balance in `request` field.
+
+`get_solver()` returns the router (sidecar → 2captcha fallback). The dashboard
+shows live captcha status (sidecar alive, 2captcha balance) and has a
+**🧩 Captcha-тест** button that solves a real 2nd-no turnstile end-to-end.
+
+## Dashboard
+
+`python dashboard.py [port]` (default 8910) — single-file stdlib server, dark UI.
+
+- **Cards**: bank stats (OK/pending/failed), Radar block countdown, 2nd-no pool size,
+  used numbers, mail pool, captcha status (sidecar/2captcha/ready).
+- **Actions**: register 2nd-no accounts, launch river wave (`--phone secondno`),
+  complete pending, reserve-test (live 2nd-no number), captcha-test (live turnstile solve).
+- **Tables**: river bank accounts (email/stage/status/key/err), 2nd-no account pool.
+- **Logs**: tail of reg2no.log / reserve_test.log / wave.log.
+- Auto-refresh every 15s (toggleable). Secrets are masked server-side.
 
 Results append to `data/river_bank.jsonl` (email, password, imap_pass, PKCE verifier,
 tokens, key material, stage/err on failure). `data/` is gitignored.
@@ -103,6 +138,8 @@ river_reg.py         main driver (signup -> verify -> radar -> exchange -> key)
 complete_pending.py  resume accounts stuck at the phone/SMS step
 secondno_register.py register 2nd-no.com accounts for --phone secondno
 secondno/            vendored 2nd-no.com client (2no.pl JSON-RPC + turnstile solvers)
+dashboard.py         web dashboard (stdlib, :8910, dark UI, cards/tables/actions)
+captcha_keys.example.json  2captcha key config template (-> data/secondno/captcha_keys.json)
 river_wave.sh        paced wave wrapper
 mail_pool.example.txt
 requirements.txt
