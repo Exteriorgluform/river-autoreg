@@ -52,6 +52,7 @@ ACTION_SIGNUP = "408cf05905813ee0522a7bfa5e0b517a06b23dd9aa"
 ACTION_PASSWORD = "409a26bdef522a0e9b7e04b2ace7cc41756b225c83"
 ACTION_VERIFY = "400f86f09b430b0bfc378d019394748599a569eb81"
 ACTION_RADAR_SEND = "4037b59e1a955702b0f9f91cf0a01766c0b9541fdd"
+DEPLOYMENT_ID = "hosted-authkit-b8ec20a00b2b35cd2ed9bbae575168c8e53cbb47-39302027821"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -147,21 +148,24 @@ def mp(fields):
 
 
 def flight_error(text):
-    if "Access blocked" in text:
-        raise RadarBlock("access blocked (WorkOS Radar IP lock)")
     m = re.search(r'\{"code":"([a-z_]+)","message":"([^"]*)"', text)
+    if m and m.group(2) and "Access blocked" in m.group(2):
+        raise RadarBlock("access blocked (WorkOS Radar IP lock)")
     return (m.group(1), m.group(2)) if m else None
 
 
 def check_block_html(text):
-    if "Access blocked" in text:
+    # NB: the i18n dictionary embedded in EVERY AuthKit page contains the literal
+    # string "Access blocked, please contact support." (escaped JSON value).
+    # A REAL block renders it as visible UI text -> match only the rendered form.
+    if re.search(r">\s*Access blocked", text):
         raise RadarBlock("access blocked (WorkOS Radar IP lock)")
 
 
-def deployment_id():
+def deployment_id(proxies=None):
     """Extract current hosted-authkit deployment id from any login page chunk URL."""
     r = cr.get(LOGIN_HOST + "/sign-up", impersonate="chrome131", timeout=30,
-               headers={"User-Agent": UA})
+               headers={"User-Agent": UA}, proxies=proxies)
     m = re.search(r"dpl=(hosted-authkit-[a-f0-9]+-\d+)", r.text)
     return m.group(1) if m else None
 
@@ -465,9 +469,9 @@ def radar_phone_step(s, rurl, page, state, asid, uid_user, provider, out, dpl):
 
 
 def register(email_addr, pw, imap_pass, imap_timeout=360, human=False, provider=None,
-             dpl=None):
+             dpl=None, proxies=None):
     out = {"email": email_addr, "imap_pass": imap_pass}
-    s = cr.Session(impersonate="chrome131")
+    s = cr.Session(impersonate="chrome131", proxies=proxies)
     s.headers.update({"User-Agent": UA, "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"})
     ver = b64u(secrets.token_bytes(32))
     ch = b64u(hashlib.sha256(ver.encode()).digest())
@@ -485,7 +489,9 @@ def register(email_addr, pw, imap_pass, imap_timeout=360, human=False, provider=
         return out
     qs = dict(p.split("=", 1) for p in str(r.url).split("?", 1)[1].split("&"))
     asid = qs.get("authorization_session_id")
-    dpl = dpl or deployment_id() or ""
+    if not dpl:
+        m = re.search(r"dpl=(hosted-authkit-[a-f0-9]+-\d+)", r.text)
+        dpl = m.group(1) if m else (deployment_id(proxies) or DEPLOYMENT_ID)
     first, last = random.choice(FIRST), random.choice(LAST)
 
     # --- email step ---
@@ -630,13 +636,14 @@ def finish(out, s, code, ver, first, last, pw):
     return out
 
 
-def console_api(access_token, path, method="GET", payload=None, team=None):
+def console_api(access_token, path, method="GET", payload=None, team=None, proxies=None):
     h = {"Authorization": AUTH + access_token, "Accept": "application/json",
          "Origin": CONSOLE, "Referer": CONSOLE + "/", "User-Agent": UA}
     if team:
         h["X-River-Team"] = team
     r = cr.request(method, CONSOLE + "/api" + path, headers=h,
-                   json=payload if payload is not None else None, impersonate="chrome131", timeout=30)
+                   json=payload if payload is not None else None, impersonate="chrome131", timeout=30,
+                   proxies=proxies)
     try:
         return r.status_code, r.json()
     except Exception:
@@ -692,6 +699,37 @@ def block_active(force=False):
     return 0
 
 
+
+def current_exit(proxies, timeout=30):
+    try:
+        r = cr.get("https://api.ipify.org", proxies=proxies, timeout=timeout)
+        return r.text.strip()
+    except Exception:
+        return None
+
+
+def rotate_exit(reboot_cmd, proxies, wait=240):
+    """Run modem-reboot command, wait for the proxy tunnel to come back with a NEW exit IP."""
+    import subprocess
+    old_ip = current_exit(proxies, timeout=15)
+    log("  [rotate] old exit:", old_ip, "| rebooting...")
+    try:
+        subprocess.run(reboot_cmd, shell=True, timeout=280, capture_output=True)
+    except Exception as e:
+        log("  [rotate] reboot cmd err:", str(e)[:80])
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        time.sleep(15)
+        ip = current_exit(proxies, timeout=20)
+        if ip and ip != old_ip:
+            log("  [rotate] new exit:", ip)
+            return ip
+        if ip:
+            log("  [rotate] same exit, waiting:", ip)
+    log("  [rotate] WARN: exit unchanged after reboot wait")
+    return old_ip
+
+
 def main():
     os.makedirs(DATA, exist_ok=True)
     n = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 1
@@ -708,16 +746,22 @@ def main():
     force = "--force" in sys.argv
     provider = get_phone_provider(sys.argv[sys.argv.index("--phone") + 1]
                                   if "--phone" in sys.argv else None)
+    proxies = None
+    if "--proxy" in sys.argv:
+        purl = sys.argv[sys.argv.index("--proxy") + 1]
+        proxies = {"http": purl, "https": purl}
+    reboot_cmd = sys.argv[sys.argv.index("--reboot-cmd") + 1] if "--reboot-cmd" in sys.argv else None
 
-    left = block_active(force)
+    left = block_active(force) if not proxies else 0
     if left:
         log(f"Radar IP block active, {left}s cooldown left ({BLOCKFILE}). Use --force to override (NOT recommended).")
         return
 
     pool = load_pool(pool_path)
     used = used_emails()
-    dpl = deployment_id() or ""
-    log("deployment:", dpl or "unknown", "| pool:", len(pool), "| used:", len(used))
+    dpl = deployment_id(proxies) or ""
+    log("deployment:", dpl or "unknown", "| pool:", len(pool), "| used:", len(used),
+        "| proxy:", (proxies or {}).get("https", "direct"))
     idx, done = start, 0
     while done < n and idx < len(pool):
         email_addr, imap_pass = pool[idx]
@@ -729,7 +773,7 @@ def main():
         log(f"[{done+1}/{n}] {email_addr} registering...")
         try:
             res = register(email_addr, pw, imap_pass, imap_timeout=imap_timeout,
-                           human=human, provider=provider, dpl=dpl)
+                           human=human, provider=provider, dpl=dpl, proxies=proxies)
         except RadarBlock as e:
             with open(BLOCKFILE, "w") as f:
                 f.write(str(int(time.time())))
@@ -743,13 +787,13 @@ def main():
         res["idx"] = idx - 1
         dt = round(time.time() - t0, 1)
         if res.get("ok"):
-            st, me = console_api(res["access_token"], "/me")
+            st, me = console_api(res["access_token"], "/me", proxies=proxies)
             res["me_status"] = st
             res["me"] = me if isinstance(me, dict) else str(me)[:200]
-            st2, billing = console_api(res["access_token"], "/billing/account")
+            st2, billing = console_api(res["access_token"], "/billing/account", proxies=proxies)
             res["billing_status"] = st2
             res["billing"] = billing if isinstance(billing, dict) else str(billing)[:300]
-            st3, key = console_api(res["access_token"], "/keys", "POST", {"name": "farm"})
+            st3, key = console_api(res["access_token"], "/keys", "POST", {"name": "farm"}, proxies=proxies)
             res["key_status"] = st3
             res["key"] = key if isinstance(key, dict) else str(key)[:400]
             log(f"[OK {dt}s] {email_addr} me={st} billing={st2} key={st3} {str(key)[:120]}")
@@ -762,7 +806,10 @@ def main():
         if res.get("stage") == "radar_block":
             break
         if done < n:
-            time.sleep(random.uniform(45, 90) if human else random.uniform(15, 30))
+            if reboot_cmd and proxies:
+                rotate_exit(reboot_cmd, proxies)
+            else:
+                time.sleep(random.uniform(45, 90) if human else random.uniform(15, 30))
     log(f"finished {done}, next idx {idx}")
 
 
