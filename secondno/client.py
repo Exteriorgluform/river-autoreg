@@ -141,10 +141,19 @@ class SecondNo:
     def _start(self):
         if self._pg is None:
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(
-                headless=self.headless, channel="chrome",
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
-                      "--window-position=2400,2400"])
+            try:
+                self._browser = self._pw.chromium.launch(
+                    headless=self.headless, channel="chrome",
+                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
+                          "--window-position=2400,2400"])
+            except Exception:
+                # channel="chrome" fails when SYSTEMDRIVE-ish env is broken
+                # (playwright resolves "undefined\Program Files\..."); use
+                # bundled chromium instead.
+                self._browser = self._pw.chromium.launch(
+                    headless=self.headless,
+                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
+                          "--window-position=2400,2400"])
             ctx = self._browser.new_context(user_agent=UA, locale="en-US")
             self._pg = ctx.new_page()
             self._pg.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
@@ -345,14 +354,14 @@ def save_account(info: dict):
     json.dump(state, open(STATE_FILE, "w", encoding="utf-8"), indent=1)
 
 
-def full_cycle(count=1, solver=None, inbox_factory=None):
+def full_cycle(count=1, solver=None, inbox_factory=None, headless=True):
     """Register fresh account(s) and grab number(s). Returns list of dicts."""
     if solver is None:
         from .captcha import get_solver
         solver = get_solver()
     out = []
     for _ in range(count):
-        s = SecondNo(solver=solver)
+        s = SecondNo(solver=solver, headless=headless)
         try:
             inbox = inbox_factory() if inbox_factory else None
             creds = s.register(inbox=inbox)
