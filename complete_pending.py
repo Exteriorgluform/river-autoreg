@@ -1,9 +1,9 @@
 # Complete River accounts stuck at the WorkOS Radar phone step.
 # Reads pending entries (stage=radar_phone_required / radar_ctx / verify_ctx) from
-# data/river_bank.jsonl, acquires a phone via --phone manual|fivesim, sends the
+# data/river_bank.jsonl, acquires a phone via --phone manual|fivesim|secondno, sends the
 # SMS challenge and exchanges the authorization code.
 #
-# Usage: python complete_pending.py [--phone manual|fivesim] [--limit N] [--email E]
+# Usage: python complete_pending.py [--phone manual|fivesim|secondno] [--limit N] [--email E]
 import json, os, re, sys, time
 
 from curl_cffi import requests as cr

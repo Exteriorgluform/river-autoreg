@@ -59,6 +59,10 @@ python river_reg.py 5 --start 100
 python river_reg.py 3 --phone manual      # код вручную в data/phone_code.json
 FIVESIM_API_KEY=*** python river_reg.py 3 --phone fivesim
 
+# бесплатные PL-номера через 2nd-no.com (вендорный пакет ./secondno)
+python secondno_register.py 1             # playwright; акки → data/secondno/state.json
+python river_reg.py 3 --phone secondno    # REUSE-FIRST резерв + OTP-поллинг
+
 # дожать акки, застрявшие на phone-шаге
 python complete_pending.py --phone fivesim
 
@@ -93,7 +97,10 @@ Radar-сигнатуры: `_1_signals` — base64 JSON-фингерпринт; �
 2. **curl_cffi multipart:** работает только `CurlMime().addpart(name=…, data=bytes)`;
    `files=dict` / `multipart=dict` → `'dict' object has no attribute '_form'`.
 3. **Phone-шаг:** WorkOS Radar вероятно режет VOIP-диапазоны — нужен real-mobile сток
-   (5sim и т.п. с депозитом).
+   (5sim и т.п. с депозитом). Бесплатный вариант `--phone secondno` (PL веб-номера
+   2nd-no.com, turnstile решает sidecar :8877 бесплатно, REUSE-FIRST экономит капчу,
+   3 номера/акк/3 дня) — вшит, но против VOIP-фильтра Radar это best-effort.
+   Акки 2nd-no регать заранее: `python secondno_register.py N` (playwright).
 4. **PKCE verifier** обязан персиститься (банк это делает) — без него
    `complete_pending.py` не обменяет код.
 5. **Google OAuth — не обход:** плюс-алиасы не меняют identity, который возвращает
@@ -106,6 +113,8 @@ Radar-сигнатуры: `_1_signals` — base64 JSON-фингерпринт; �
 ```
 river_reg.py         главный драйвер: signup → verify → radar → exchange → key
 complete_pending.py  дожатие акков, застрявших на phone/SMS-шаге
+secondno_register.py рега акков 2nd-no.com для --phone secondno
+secondno/            вендорный клиент 2nd-no.com (2no.pl JSON-RPC + turnstile-солверы)
 river_wave.sh        пейсинг-обёртка волны
 mail_pool.example.txt
 requirements.txt

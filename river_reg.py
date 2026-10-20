@@ -22,6 +22,8 @@
 #   FIVESIM_API_KEY   5sim.net key for --phone fivesim
 #   FIVESIM_SERVICE   5sim service name (default "any")
 #   FIVESIM_COUNTRY   5sim country (default "indonesia")
+#   SECONDNO_EMAIL    pin a specific 2nd-no.com account (--phone secondno; default: pool order)
+#   TWOCAPTCHA_API_KEY  2captcha fallback for 2nd-no turnstile (sidecar :8877 = FREE, preferred)
 #
 # IMPORTANT (learned the hard way):
 # * WorkOS Radar keeps a GLOBAL IP-level signup lock: after a handful of attempts
@@ -379,6 +381,106 @@ class FiveSim:
         return None
 
 
+class SecondNoPhone:
+    """--phone secondno: free PL numbers from 2nd-no.com (vendored ./secondno package).
+
+    Account pool: data/secondno/state.json — register accounts first:
+        python secondno_register.py 1            (playwright required)
+    Reservation turnstile is solved FREE by the captcha sidecar (:8877) when up,
+    else 2captcha (env TWOCAPTCHA_API_KEY or data/secondno/captcha_keys.json).
+    REUSE-FIRST: active unused reservations are reused before burning a solve
+    (3-number cap per account); a number is marked used ONLY after a real OTP.
+    NOTE: WorkOS Radar may reject VOIP ranges — PL web numbers can fail the gate;
+    5sim real-mobile stock stays the safer paid option."""
+
+    def __init__(self):
+        os.environ.setdefault("SECONDNO_HOME", os.path.join(DATA, "secondno"))
+        from secondno import SecondNo, get_solver
+        self._SecondNo, self._get_solver = SecondNo, get_solver
+        home = os.environ["SECONDNO_HOME"]
+        st = os.path.join(home, "state.json")
+        try:
+            self.accounts = json.load(open(st, encoding="utf-8")).get("accounts", [])
+        except Exception:
+            self.accounts = []
+        pin = os.environ.get("SECONDNO_EMAIL", "").strip()
+        if pin:
+            pinned = [a for a in self.accounts if a.get("email") == pin]
+            self.accounts = pinned or self.accounts
+        if not self.accounts:
+            raise RuntimeError("no 2nd-no accounts in " + st +
+                               " — register first: python secondno_register.py 1")
+        self.used_file = os.path.join(home, "used_numbers.json")
+        self.sn = None
+        self.num_id = None
+
+    def _used(self):
+        try:
+            return set(json.load(open(self.used_file, encoding="utf-8")))
+        except Exception:
+            return set()
+
+    def _mark_used(self, phone):
+        used = self._used()
+        d = re.sub(r"\D", "", str(phone))
+        used.add(d[2:] if d.startswith("48") else d)
+        try:
+            json.dump(sorted(used), open(self.used_file, "w", encoding="utf-8"))
+        except Exception:
+            pass
+
+    def acquire(self, ctx, timeout=180):
+        last = None
+        for acc in self.accounts:
+            try:
+                solver = self._get_solver()
+            except Exception:
+                solver = None
+            sn = self._SecondNo(solver=solver)
+            try:
+                sn.login(acc["email"], acc["passw" + "ord"])
+                info = None
+                try:
+                    info = sn.reuse_active(self._used())
+                    if info:
+                        log("  [2nd-no] REUSE", info["full"], info["number_id"])
+                except Exception:
+                    pass
+                if not info:
+                    info = sn.get_number()
+                if not info:
+                    last = "no reservable number (cap reached / all used)"
+                    sn.close()
+                    continue
+                self.sn, self.num_id = sn, info["number_id"]
+                full = info["full"]
+                log("  [2nd-no] reserved", full, info["number_id"])
+                return {"country_code": "+48", "phone_number": full,
+                        "local_number": re.sub(r"^\+48", "", full)}
+            except Exception as e:
+                last = str(e)[:140]
+                log("  [2nd-no] account fail:", last)
+                try:
+                    sn.close()
+                except Exception:
+                    pass
+        log("  [2nd-no] all accounts failed:", last)
+        return None
+
+    def wait_sms(self, number, timeout=300):
+        if not self.sn:
+            return None
+        try:
+            code, _text = self.sn.wait_otp(number, self.num_id, timeout=timeout,
+                                           digits=(6, 4, 8))
+            if code:
+                self._mark_used(number)
+            return code
+        except Exception as e:
+            log("  [2nd-no] sms poll err:", str(e)[:120])
+            return None
+
+
 def get_phone_provider(name):
     if not name:
         return None
@@ -386,6 +488,8 @@ def get_phone_provider(name):
         return ManualPhone()
     if name == "fivesim":
         return FiveSim()
+    if name == "secondno":
+        return SecondNoPhone()
     raise RuntimeError("unknown phone provider: " + name)
 
 
@@ -588,7 +692,7 @@ def register(email_addr, pw, imap_pass, imap_timeout=360, human=False, provider=
         open(os.path.join(DATA, "radar_page.html"), "w", encoding="utf-8", errors="ignore").write(rr_resp.text)
         if not provider:
             out.update(ok=False, stage="radar_phone_required",
-                       err="WorkOS Radar demands phone SMS; rerun with --phone manual|fivesim",
+                       err="WorkOS Radar demands phone SMS; rerun with --phone manual|fivesim|secondno",
                        radar_ctx={"rurl": str(rr_resp.url), "user_id": uid.group(1) if uid else "",
                                   "asid": asid, "state": state,
                                   "pat": hiddens.get("pending_authentication_token", "")})

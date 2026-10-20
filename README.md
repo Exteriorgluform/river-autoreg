@@ -67,6 +67,10 @@ python river_reg.py 5 --start 100
 python river_reg.py 3 --phone manual      # you fill data/phone_code.json
 FIVESIM_API_KEY=*** python river_reg.py 3 --phone fivesim
 
+# free PL numbers via 2nd-no.com (vendored ./secondno package)
+python secondno_register.py 1             # playwright; accounts -> data/secondno/state.json
+python river_reg.py 3 --phone secondno    # REUSE-FIRST reservation + OTP poll
+
 # finish accounts stuck at the phone step later
 python complete_pending.py --phone fivesim
 ```
@@ -85,6 +89,8 @@ tokens, key material, stage/err on failure). `data/` is gitignored.
   refreshed per call, hashes are static (one real machine). Reuse across many
   signups raises the Radar score → phone challenge → IP block.
 - **WorkOS Radar phone step** likely rejects VOIP ranges — use real-mobile stock.
+  Free option `--phone secondno` (2nd-no.com PL web numbers, sidecar-solved turnstile,
+  REUSE-FIRST) is wired in, but treat it as best-effort against Radar's VOIP filter.
 - **PKCE verifier** must be persisted (bank does it) — `complete_pending.py` cannot
   exchange the code without it.
 - Google OAuth signup is *not* a bypass: plus-aliases don't change the identity
@@ -95,6 +101,8 @@ tokens, key material, stage/err on failure). `data/` is gitignored.
 ```
 river_reg.py         main driver (signup -> verify -> radar -> exchange -> key)
 complete_pending.py  resume accounts stuck at the phone/SMS step
+secondno_register.py register 2nd-no.com accounts for --phone secondno
+secondno/            vendored 2nd-no.com client (2no.pl JSON-RPC + turnstile solvers)
 river_wave.sh        paced wave wrapper
 mail_pool.example.txt
 requirements.txt
