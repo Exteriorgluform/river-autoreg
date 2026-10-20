@@ -1,0 +1,106 @@
+# river-autoreg
+
+Fast HTTP-only autoreg for **River.ai** (`console.river.ai`, WorkOS AuthKit) — no browser
+in the hot path. `curl_cffi` (chrome131 impersonation) replays the AuthKit Next.js
+server-action flow end to end, reads the email code over IMAP, exchanges the PKCE code
+for an access token and pulls a `rv_*` API key from the console API.
+
+## Status (2026-10-20)
+
+| Step | Status |
+|------|--------|
+| PKCE authorize | ✅ |
+| Email step (`/sign-up` server action) | ✅ |
+| Password step (`/sign-up/password` server action) | ✅ (user created) |
+| Email verification (`/email-verification` + IMAP code) | ✅ |
+| **WorkOS Radar phone challenge** (`/radar-challenge/send`) | ⚠️ gate — needs SMS (`--phone`) |
+| Token exchange + console API key | implemented, not yet reached in the wild |
+
+**The wall:** after ~7 signups from one IP, WorkOS Radar escalates to a *global IP-level*
+`Access blocked, please contact support` (even in a real browser) and **every further
+attempt extends the lock (~3–4 h)**. The driver detects this, writes `data/radar_block`
+and aborts the wave. Respect the cooldown; pace at ≤1 signup / 30–60 min per IP, or
+rotate clean residential IPs.
+
+## Flow
+
+```
+auth.console.river.ai/user_management/authorize   (PKCE, screen_hint=sign-up)
+  -> login.console.river.ai/sign-up               POST next-action 408cf059...
+  -> login.console.river.ai/sign-up/password      POST next-action 409a26bd...
+  -> login.console.river.ai/email-verification    IMAP 6-digit code (TTL 15 min)
+                                                  POST next-action 400f86f0...
+  -> [Radar] /radar-challenge/send                phone SMS, next-action 4037b59e...
+  -> ?code=... redirect
+  -> auth.console.river.ai/user_management/authenticate  (code + verifier)
+  -> console.river.ai/api/me, /api/billing/account, POST /api/keys
+```
+
+Next.js server actions are replayed as `multipart/form-data` with headers
+`next-action`, `accept: text/x-component`, `x-deployment-id` (fetched dynamically —
+WorkOS redeploys rotate it). Field names carry the `_1_` flight-prefix
+(`_1_email`, `_1_signals`, ...) plus `0=["$K1"]`; extra/unknown fields cause
+`invalid_params`. If a deployment rotates the action ids, `discover_action()`
+re-extracts them from the page's `page-*.js` chunk on 404.
+
+## Setup
+
+```bash
+pip install -r requirements.txt          # curl_cffi
+cp mail_pool.example.txt mail_pool.txt   # or point RIVER_MAIL_POOL at your pool
+```
+
+Mail pool format — one `email:imap_password` per line (default provider: t-online.de
+IMAP `secureimap.t-online.de:993`; other providers: edit `IMAP_HOST` / pass
+`imap_host` to `read_code_imap`).
+
+## Usage
+
+```bash
+# single registration, human-like pauses, IMAP wait 13 min
+python river_reg.py 1 --human --imap-timeout 780
+
+# wave of 5 starting at pool index 100
+python river_reg.py 5 --start 100
+
+# with phone challenge handling
+python river_reg.py 3 --phone manual      # you fill data/phone_code.json
+FIVESIM_API_KEY=*** python river_reg.py 3 --phone fivesim
+
+# finish accounts stuck at the phone step later
+python complete_pending.py --phone fivesim
+```
+
+Results append to `data/river_bank.jsonl` (email, password, imap_pass, PKCE verifier,
+tokens, key material, stage/err on failure). `data/` is gitignored.
+
+## Pitfalls (all paid for in blood)
+
+- **t-online alias trap:** `base-0001`, `base-001`, `base-01`, `base-1` are the SAME
+  mailbox. IMAP must filter by exact `To:` header; letters lag up to 7+ minutes
+  (`--imap-timeout 780`), and codes expire 15 min after send.
+- **curl_cffi multipart:** only `CurlMime().addpart(name=..., data=bytes)` works;
+  `files=dict` / `multipart=dict` raise `'dict' object has no attribute '_form'`.
+- **Radar signals:** `_1_signals` is a base64 JSON fingerprint blob; timestamps are
+  refreshed per call, hashes are static (one real machine). Reuse across many
+  signups raises the Radar score → phone challenge → IP block.
+- **WorkOS Radar phone step** likely rejects VOIP ranges — use real-mobile stock.
+- **PKCE verifier** must be persisted (bank does it) — `complete_pending.py` cannot
+  exchange the code without it.
+- Google OAuth signup is *not* a bypass: plus-aliases don't change the identity
+  Google returns, so each River account needs a distinct real Gmail.
+
+## Files
+
+```
+river_reg.py         main driver (signup -> verify -> radar -> exchange -> key)
+complete_pending.py  resume accounts stuck at the phone/SMS step
+river_wave.sh        paced wave wrapper
+mail_pool.example.txt
+requirements.txt
+```
+
+## Disclaimer
+
+Research/interop tooling for a service you are authorized to test. WorkOS Radar
+exists for a reason — pace your runs, don't hammer shared IPs.

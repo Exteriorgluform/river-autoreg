@@ -1,0 +1,7 @@
+data/
+*.jsonl
+mail_pool.txt
+*.log
+*.html
+__pycache__/
+config.json

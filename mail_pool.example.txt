@@ -1,0 +1,5 @@
+# mail pool: one "email:imap_password" per line
+# default IMAP host: secureimap.t-online.de:993 (edit IMAP_HOST in river_reg.py for others)
+# example:
+# 0123456789-0001@t-online.de:SomePass1!
+# NOTE t-online alias trap: -0001/-001/-01/-1 are the SAME mailbox.
